@@ -1,0 +1,36 @@
+name: Build FLIP Fluids Windows
+
+# This allows you to trigger the build manually by clicking a button
+on: 
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    # 1. Download the code
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Configure the Build using CMake
+    # We enable specific flags to ensure it builds the addon structure correctly
+    - name: Configure CMake
+      run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_FLIP_FLUIDS_ADDON=ON
+
+    # 3. Compile the Code (This takes the longest)
+    - name: Build
+      run: cmake --build build --config Release --target install --parallel
+
+    # 4. Zip the resulting addon folder so it's ready for Blender
+    - name: Zip Addon
+      run: |
+        cd build/install
+        powershell Compress-Archive -Path bl_flip_fluids -DestinationPath flip_fluids_addon.zip
+
+    # 5. Upload the Zip file to GitHub so you can download it
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: FLIP_Fluids_Windows_Addon
+        path: build/install/flip_fluids_addon.zip
