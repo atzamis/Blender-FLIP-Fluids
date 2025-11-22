@@ -1,42 +1,98 @@
-name: Build FLIP Fluids Windows (MinGW)
+name: Build FLIP Fluids (Windows, MSVC)
 
-on: 
+on:
   workflow_dispatch:
+    inputs:
+      blender-version:
+        description: 'Blender version to download (examples: 4.5, 5.0). Leave blank to provide custom URL.'
+        required: false
+        default: '4.5'
+      blender-download-url:
+        description: 'Optional: custom direct download URL to a Windows Blender zip. If provided, this is used instead of the preset URLs.'
+        required: false
+        default: ''
 
 jobs:
-  build-windows-mingw:
+  build:
     runs-on: windows-latest
-    
+    env:
+      BUILD_CONFIG: Release
+
     steps:
-    # 1. Download the code
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout repository at job ref
+        uses: actions/checkout@v4
+        with:
+          # use the commit ref observed in the failing job so CI builds the same code you tested
+          ref: df656fdc5ccd7e9757c30d8c3c9044e86b9d3a1c
+          fetch-depth: 0
 
-    # 2. Install MinGW (The GCC compiler for Windows)
-    # This creates an environment compatible with the physics math
-    - name: Set up MinGW
-      uses: egor-tensin/setup-mingw@v2
-      with:
-        platform: x64
+      - name: Show runner info
+        run: |
+          echo "Runner: $RUNNER_OS"
+          cmake --version || echo "cmake not found"
+          ninja --version || echo "ninja not found"
 
-    # 3. Configure CMake to use MinGW Makefiles
-    # We changed the generator (-G) from Visual Studio to MinGW Makefiles
-    - name: Configure CMake
-      run: cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_FLIP_FLUIDS_ADDON=ON
+      - name: Determine Blender download URL
+        id: blender
+        run: |
+          if ('${{ github.event.inputs.blender-download-url }}' -ne '') {
+            echo "Using custom Blender URL"
+            echo "url=${{ github.event.inputs.blender-download-url }}" >> $GITHUB_OUTPUT
+          } else {
+            $ver='${{ github.event.inputs.blender-version }}'
+            if ($ver -like '5*') {
+              # adjust exact patch if needed
+              $url = "https://download.blender.org/release/Blender5.0/blender-5.0.0-windows-x64.zip"
+            } else {
+              # default: 4.5 LTS (adjust patch if Blender releases minor)
+              $url = "https://download.blender.org/release/Blender4.5/blender-4.5.0-windows-x64.zip"
+            }
+            echo "url=$url" >> $GITHUB_OUTPUT
+          }
 
-    # 4. Compile the Code
-    - name: Build
-      run: cmake --build build --target install --parallel
+      - name: Download and extract Blender
+        run: |
+          $dl = "${{ steps.blender.outputs.url }}"
+          echo "Downloading Blender from $dl"
+          $out = "$env:RUNNER_TEMP\\blender.zip"
+          Invoke-WebRequest -Uri $dl -OutFile $out -UseBasicParsing
+          $dest = "$env:RUNNER_TEMP\\blender"
+          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+          Expand-Archive -Path $out -DestinationPath $dest
+          # Blender ZIP usually contains a top-level "blender" folder; find it
+          $extracted = Get-ChildItem -Directory $dest | Select-Object -First 1
+          if ($extracted) {
+            $blender_root = Join-Path $dest $extracted.Name
+          } else {
+            $blender_root = $dest
+          }
+          echo "blender_root=$blender_root" >> $env:GITHUB_ENV
+          echo "Blender extracted to $blender_root"
 
-    # 5. Zip the resulting addon folder
-    - name: Zip Addon
-      run: |
-        cd build/install
-        powershell Compress-Archive -Path bl_flip_fluids -DestinationPath flip_fluids_addon.zip
+      - name: Configure build (CMake)
+        env:
+          BLENDER_ROOT: ${{ env.blender_root }}
+        run: |
+          echo "BLENDER_ROOT = $env:blender_root"
+          mkdir build || exit 0
+          cd build
+          rem Choose generator: Visual Studio 17 2022 is present on windows-latest
+          cmake -S .. -B . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }} -DBLENDER_DIR="$env:blender_root"
+          cd ..
 
-    # 6. Upload the Zip file
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: FLIP_Fluids_Windows_Addon_MinGW
-        path: build/install/flip_fluids_addon.zip
+      - name: Build (MSVC)
+        run: |
+          cd build
+          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel
+          cd ..
+
+      - name: Package / Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flip-fluids-windows-${{ env.BUILD_CONFIG }}
+          path: |
+            build/**/Release/*
+            build/**/${{ env.BUILD_CONFIG }}/*
+
+      - name: Print build location
+        run: dir /s /b build || echo "build directory missing"
