@@ -1,0 +1,191 @@
+name: Build FLIP Fluids for Windows 10
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2019  # Windows 10 compatible
+    strategy:
+      matrix:
+        blender_version: 
+          - version: "4.5"
+            tag: "blender-4.5-lts"
+            download_url: "https://download.blender.org/release/Blender4.5/blender-4.5.0-windows-x64.zip"
+          - version: "5.0"
+            tag: "blender-5.0"
+            download_url: "https://download.blender.org/release/Blender5.0/blender-5.0.3-windows-x64.zip"
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install MSYS2 and MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-openexr
+            mingw-w64-x86_64-imath
+            mingw-w64-x86_64-alembic
+            make
+            git
+
+      - name: Cache Alembic and dependencies
+        uses: actions/cache@v4
+        id: cache-deps
+        with:
+          path: |
+            C:/msys64/mingw64/lib
+            C:/msys64/mingw64/include
+          key: ${{ runner.os }}-alembic-imath-${{ hashFiles('**/CMakeLists.txt') }}
+
+      - name: Set up environment paths
+        shell: bash
+        run: |
+          echo "C:/msys64/mingw64/bin" >> $GITHUB_PATH
+          echo "CMAKE_PREFIX_PATH=C:/msys64/mingw64" >> $GITHUB_ENV
+
+      - name: Verify MinGW installation
+        shell: msys2 {0}
+        run: |
+          gcc --version
+          g++ --version
+          cmake --version
+          make --version
+
+      - name: Build FLIP Fluids
+        shell: msys2 {0}
+        run: |
+          mkdir -p build
+          cd build
+          
+          # Configure with CMake using MinGW Makefiles
+          cmake .. \
+            -G "MinGW Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="C:/msys64/mingw64" \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/bl_flip_fluids" \
+            -DAlembic_DIR="C:/msys64/mingw64/lib/cmake/Alembic" \
+            -DImath_DIR="C:/msys64/mingw64/lib/cmake/Imath"
+          
+          # Build release version
+          mingw32-make -j$(nproc)
+          
+          echo "Build completed successfully"
+
+      - name: Copy required DLLs to addon
+        shell: msys2 {0}
+        run: |
+          # Create lib directory for dependencies
+          mkdir -p build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib
+          mkdir -p build/bl_flip_fluids/flip_fluids_addon/ffengine/lib
+          
+          # Copy Alembic and Imath DLLs
+          cp /mingw64/bin/libAlembic.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/libImath-*.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/libIex-*.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/libIlmThread-*.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          
+          # Copy other required dependencies
+          cp /mingw64/bin/libstdc++-6.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/libgcc_s_seh-1.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/libwinpthread-1.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          cp /mingw64/bin/zlib1.dll build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/ || true
+          
+          # List what was copied
+          echo "Copied DLLs:"
+          ls -lh build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib/
+
+      - name: Remove .dll.a files (import libraries)
+        shell: bash
+        run: |
+          find build/bl_flip_fluids/flip_fluids_addon/pyfluid/lib -name "*.dll.a" -type f -delete
+
+      - name: Package addon
+        shell: bash
+        run: |
+          cd build/bl_flip_fluids
+          7z a -tzip "../../flip_fluids_addon_blender_${{ matrix.blender_version.version }}_windows10_x64.zip" flip_fluids_addon/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flip_fluids_blender_${{ matrix.blender_version.version }}_windows10_x64
+          path: flip_fluids_addon_blender_${{ matrix.blender_version.version }}_windows10_x64.zip
+          retention-days: 30
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: flip_fluids_addon_blender_${{ matrix.blender_version.version }}_windows10_x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Test the compiled addon
+  test-addon:
+    needs: build-windows
+    runs-on: windows-2019
+    strategy:
+      matrix:
+        blender_version: 
+          - version: "4.5"
+            download_url: "https://download.blender.org/release/Blender4.5/blender-4.5.0-windows-x64.zip"
+          - version: "5.0"
+            download_url: "https://download.blender.org/release/Blender5.0/blender-5.0.3-windows-x64.zip"
+    
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flip_fluids_blender_${{ matrix.blender_version.version }}_windows10_x64
+
+      - name: Download Blender
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ matrix.blender_version.download_url }}" -OutFile "blender.zip"
+          Expand-Archive -Path "blender.zip" -DestinationPath "blender_extracted"
+          $blenderDir = Get-ChildItem -Path "blender_extracted" -Directory | Select-Object -First 1
+          echo "BLENDER_PATH=$($blenderDir.FullName)" >> $env:GITHUB_ENV
+
+      - name: Install addon in Blender
+        shell: pwsh
+        run: |
+          $addonZip = Get-ChildItem -Filter "flip_fluids_addon_*.zip" | Select-Object -First 1
+          $blenderExe = "$env:BLENDER_PATH\blender.exe"
+          
+          # Test that Blender launches
+          & $blenderExe --version
+
+      - name: Test addon loading
+        shell: pwsh
+        run: |
+          $blenderExe = "$env:BLENDER_PATH\blender.exe"
+          $addonZip = Get-ChildItem -Filter "flip_fluids_addon_*.zip" | Select-Object -First 1
+          
+          # Extract addon to Blender's addons directory
+          $addonDir = "$env:BLENDER_PATH\${{ matrix.blender_version.version }}\scripts\addons"
+          New-Item -ItemType Directory -Force -Path $addonDir
+          Expand-Archive -Path $addonZip.FullName -DestinationPath $addonDir -Force
+          
+          # Test addon import
+          & $blenderExe --background --python-expr "import bpy; bpy.ops.preferences.addon_enable(module='flip_fluids_addon'); print('FLIP Fluids addon loaded successfully')"
